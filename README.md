@@ -4,7 +4,18 @@ A next-generation multi-link aggregator **bonding client** designed for **OpenWr
 
 ## Overview
 
-EdgeBOS Aggregator Next Client is the client-side component of a client-server bonding architecture, specifically designed for **OpenWrt 24** routers and edge devices. The client bonds multiple network interfaces (4G/5G, WiFi, Ethernet, etc.) and intelligently distributes traffic across them to the EdgeBOS Aggregator Next Server. This approach provides more granular control over packet routing, load balancing, and failover mechanisms compared to traditional MPTCP.
+EdgeBOS Aggregator Next Client is the client-side component of a client-server bonding architecture, specifically designed for **OpenWrt 24** routers and edge devices. The client uses **MIMO-inspired multi-link aggregation** concepts to bond multiple network interfaces (4G/5G, WiFi, Ethernet, etc.) and intelligently distributes traffic across them to the EdgeBOS Aggregator Next Server. This approach provides more granular control over packet routing, load balancing, and failover mechanisms compared to traditional MPTCP.
+
+### MIMO-Inspired Multi-Link Aggregation
+
+Similar to how MIMO (Multiple-Input Multiple-Output) wireless technology uses multiple antennas to transmit different spatial streams based on channel conditions, EdgeBOS Aggregator Next treats each WAN interface as a transmission channel. Each outgoing packet is:
+
+1. **Captured** from the LAN traffic
+2. **Segmented and sequenced** for reliable reassembly
+3. **Assigned to a WAN link** based on real-time link-state metrics
+4. **Transmitted** through the selected WAN interface
+
+This is analogous to MIMO's transmit-chain, where each antenna carries a different spatial stream optimized for current channel conditions.
 
 ### How It Works
 
@@ -15,11 +26,14 @@ EdgeBOS Aggregator Next Client is the client-side component of a client-server b
 
 This architecture allows for:
 
-- **Direct packet-level control**: Manage packet routing and distribution across multiple links
+- **Direct packet-level control**: Complete control over packet routing via TUN interface interception
+- **MIMO-inspired scheduling**: Intelligent segment distribution based on real-time link conditions
+- **True bandwidth aggregation**: Combine bandwidth from multiple WANs for single flows
 - **Custom load balancing algorithms**: Implement sophisticated strategies beyond what MPTCP offers
-- **Enhanced failover mechanisms**: Faster detection and recovery from link failures
-- **Protocol-agnostic aggregation**: Not limited to TCP connections
+- **Enhanced failover mechanisms**: Faster detection and recovery from link failures (sub-second)
+- **Protocol-agnostic aggregation**: Works with TCP, UDP, ICMP, and all IP protocols
 - **Fine-grained QoS**: Per-packet or per-flow quality of service controls
+- **Out-of-order tolerance**: Server reassembles packets even when segments arrive out of order
 
 ## Key Differences from Previous Version
 
@@ -28,9 +42,11 @@ The original EdgeBOS Aggregator focused on system monitoring and heartbeat servi
 | Feature | Previous Version | Next Generation |
 |---------|-----------------|-----------------|
 | **Primary Purpose** | System monitoring & heartbeat | Multi-link network aggregation |
-| **Aggregation Method** | N/A | Custom lower-level implementation |
-| **Network Layer** | Application layer | Network/Transport layer |
-| **Use Case** | Server health monitoring | Bandwidth aggregation & redundancy |
+| **Aggregation Method** | N/A | MIMO-inspired packet segmentation |
+| **Network Layer** | Application layer | Network layer (TUN interface) |
+| **Use Case** | Server health monitoring | True bandwidth aggregation & redundancy |
+| **Packet Handling** | N/A | Per-packet interception and scheduling |
+| **Link Selection** | N/A | Real-time adaptive scheduling |
 
 ## Architecture
 
@@ -72,6 +88,221 @@ The client operates at a lower network stack level to:
 6. **Maintain session state** and reconnection logic
 7. **Report metrics** to the server for coordinated load balancing
 
+## Technical Architecture
+
+### Packet Processing Pipeline
+
+EdgeBOS Aggregator Next Client implements a sophisticated per-packet processing pipeline that gives complete control over how traffic is distributed across multiple WAN links.
+
+#### Step 1: Packet Interception (TUN Interface)
+
+The edge device creates a **TUN (network TUNnel) interface** that acts as the gateway for all outbound traffic.
+
+```
+┌─────────────────────────────────────┐
+│  LAN Devices (Clients)              │
+│  • Phones, laptops, IoT devices     │
+└──────────────┬──────────────────────┘
+               │ All outbound traffic
+               ▼
+┌─────────────────────────────────────┐
+│  TUN Interface (edgebos0)           │
+│  • Virtual network device           │
+│  • Captures raw IP packets          │
+└──────────────┬──────────────────────┘
+               │ Raw IP data
+               ▼
+     EdgeBOS Processing Engine
+```
+
+**How it works:**
+- A TUN interface (`edgebos0`) is created on the OpenWrt router
+- All outbound traffic from the LAN is routed into this TUN device via routing rules
+- Each packet is pulled from the TUN interface as raw IP data
+- The EdgeBOS client has complete control over each packet
+
+**Purpose:** Gain total control of per-packet scheduling before any WAN interface sees the traffic.
+
+#### Step 2: Packet Segmentation and Sequencing
+
+Once a packet is captured, it undergoes segmentation and sequencing:
+
+```
+Original Packet (1500 bytes)
+         │
+         ▼
+┌────────────────────────────┐
+│  Segmentation Engine       │
+│  • Split into chunks       │
+│  • Add sequence numbers    │
+│  • Add reassembly metadata │
+└────────────────────────────┘
+         │
+         ▼
+Segment 1 [Seq: 1001] [500 bytes]
+Segment 2 [Seq: 1002] [500 bytes]
+Segment 3 [Seq: 1003] [500 bytes]
+```
+
+**Key features:**
+- **Sequence numbering**: Each segment gets a unique sequence number for reassembly
+- **Metadata addition**: Flow ID, timestamp, checksum for integrity
+- **Adaptive segmentation**: Segment size adjusts based on link MTU and conditions
+- **Out-of-order handling**: Server can reassemble even if segments arrive out of order
+
+#### Step 3: Link Selection (MIMO-Inspired Scheduling)
+
+Each segment is assigned to a WAN link based on real-time link-state metrics:
+
+```
+┌─────────────────────────────────────┐
+│  Link State Monitor                 │
+│                                     │
+│  WAN1 (4G):  Latency: 45ms         │
+│              Bandwidth: 20 Mbps     │
+│              Loss: 0.5%             │
+│              Queue: 12 packets      │
+│                                     │
+│  WAN2 (5G):  Latency: 28ms         │
+│              Bandwidth: 50 Mbps     │
+│              Loss: 0.1%             │
+│              Queue: 3 packets       │
+│                                     │
+│  WAN3 (WiFi): Latency: 15ms        │
+│              Bandwidth: 100 Mbps    │
+│              Loss: 2.0%             │
+│              Queue: 8 packets       │
+└─────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────┐
+│  Scheduling Algorithm               │
+│  • Weighted round-robin             │
+│  • Latency-based                    │
+│  • Adaptive (ML-based)              │
+└─────────────────────────────────────┘
+         │
+         ▼
+Segment 1 → WAN2 (5G)     [Best bandwidth, low latency]
+Segment 2 → WAN3 (WiFi)   [Lowest latency]
+Segment 3 → WAN1 (4G)     [Available capacity]
+```
+
+**Scheduling factors:**
+- **Latency**: Prefer low-latency links for time-sensitive traffic
+- **Bandwidth**: Distribute load based on available bandwidth
+- **Packet loss**: Avoid lossy links when possible
+- **Queue depth**: Balance load across links
+- **Link cost**: Consider metered vs unmetered connections
+- **Historical performance**: Learn from past behavior
+
+#### Step 4: Transmission Through Selected WAN
+
+Each segment is transmitted through its assigned WAN interface:
+
+```
+Segment 1 → [WAN2 - 5G Modem] → Internet → Server
+Segment 2 → [WAN3 - WiFi]     → Internet → Server
+Segment 3 → [WAN1 - 4G Modem] → Internet → Server
+```
+
+**Transmission features:**
+- **Parallel transmission**: All segments sent simultaneously across different WANs
+- **Per-link encryption**: Each tunnel is independently encrypted
+- **Automatic retry**: Failed transmissions are retried on alternate links
+- **Congestion control**: Per-link flow control prevents buffer bloat
+
+#### Step 5: Server-Side Reassembly
+
+At the server, segments are reassembled into the original packet:
+
+```
+Server receives:
+  Segment 2 [Seq: 1002] via WAN3 (arrives first)
+  Segment 1 [Seq: 1001] via WAN2 (arrives second)
+  Segment 3 [Seq: 1003] via WAN1 (arrives third)
+         │
+         ▼
+┌─────────────────────────────────────┐
+│  Reassembly Engine                  │
+│  • Reorder by sequence number       │
+│  • Verify checksums                 │
+│  • Reconstruct original packet      │
+└─────────────────────────────────────┘
+         │
+         ▼
+Original Packet (1500 bytes) → Destination
+```
+
+### Complete Data Flow
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    OpenWrt Edge Device                    │
+│                                                           │
+│  LAN → TUN → Segment → Schedule → WAN1 (4G)   ─┐        │
+│                                                  │        │
+│                              → WAN2 (5G)   ─────┼───┐    │
+│                                                  │   │    │
+│                              → WAN3 (WiFi) ─────┘   │    │
+└──────────────────────────────────────────────────────────┘
+                                                      │
+                                    Internet          │
+                                                      │
+┌──────────────────────────────────────────────────────────┐
+│                 EdgeBOS Aggregator Server                │
+│                                                           │
+│  WAN1 ─┐                                                 │
+│        ├─→ Reassemble → Original Packet → Destination   │
+│  WAN2 ─┤                                                 │
+│        │                                                 │
+│  WAN3 ─┘                                                 │
+└──────────────────────────────────────────────────────────┘
+```
+
+### MIMO Analogy
+
+| MIMO Wireless | EdgeBOS Multi-Link |
+|---------------|-------------------|
+| Multiple antennas | Multiple WAN interfaces |
+| Spatial streams | Packet segments |
+| Channel state info | Link-state metrics |
+| Beamforming | Adaptive scheduling |
+| Diversity gain | Bandwidth aggregation |
+| MIMO combining | Packet reassembly |
+| Transmit diversity | Multi-path redundancy |
+| Channel coding | Packet sequencing |
+
+### Advantages of TUN-Based Packet Interception
+
+Using a TUN interface for packet interception provides several critical advantages:
+
+#### 1. Complete Packet Control
+- **Before routing decisions**: Packets are captured before the kernel makes any routing decisions
+- **Raw IP access**: Full access to IP headers and payload for intelligent scheduling
+- **Protocol agnostic**: Works with TCP, UDP, ICMP, and any IP-based protocol
+
+#### 2. Per-Packet Scheduling
+- **Granular control**: Each packet can be routed independently
+- **Flow awareness**: Can identify and optimize specific flows (e.g., video streaming, gaming)
+- **Dynamic adaptation**: Real-time adjustment based on current link conditions
+
+#### 3. Transparent to Applications
+- **No application changes**: Works with all existing applications
+- **No protocol modifications**: Standard TCP/IP stack remains unchanged
+- **Universal compatibility**: Supports all network protocols and applications
+
+#### 4. Efficient Resource Usage
+- **Kernel-space operation**: Minimal context switching for performance
+- **Zero-copy where possible**: Efficient packet handling
+- **Low CPU overhead**: Optimized for embedded OpenWrt devices
+
+#### 5. Advanced Features
+- **Traffic shaping**: Per-flow QoS before transmission
+- **Encryption**: Secure tunnels per WAN link
+- **Compression**: Optional compression before segmentation
+- **Prioritization**: Real-time traffic gets priority scheduling
+
 ## Project Status
 
 🚧 **This project is currently in active development** 🚧
@@ -81,15 +312,19 @@ The next-generation aggregator client is being built from the ground up with a f
 ## Planned Features
 
 ### Core Client Features
+- [ ] TUN interface creation and packet interception
 - [ ] Multi-interface detection and management
-- [ ] Packet distribution across bonded links
+- [ ] Packet segmentation and sequencing engine
+- [ ] MIMO-inspired adaptive scheduling
+- [ ] Real-time link-state monitoring (latency, bandwidth, loss, queue depth)
 - [ ] Custom load balancing algorithms (round-robin, weighted, latency-based, adaptive)
-- [ ] Real-time link quality monitoring
 - [ ] Automatic failover and recovery
 - [ ] Dynamic link addition/removal (hot-plug support)
+- [ ] Per-packet and per-flow scheduling
 - [ ] Traffic shaping and QoS per interface
-- [ ] Protocol tunneling support (GRE, VXLAN, custom)
-- [ ] Local routing and NAT traversal
+- [ ] Encrypted tunnels per WAN link
+- [ ] Out-of-order packet handling
+- [ ] Automatic MTU discovery and adaptation
 
 ### Management & Monitoring
 - [ ] Command-line interface for configuration
@@ -347,22 +582,73 @@ The client can bond various types of network interfaces commonly found in OpenWr
 
 ## Load Balancing Algorithms
 
-### Round-Robin
-Distributes packets evenly across all available links in sequence.
+EdgeBOS Aggregator Next Client implements multiple scheduling algorithms inspired by MIMO channel selection strategies:
 
-### Weighted
-Distributes packets based on configured weights (e.g., prefer faster links).
+### Round-Robin
+Distributes packet segments evenly across all available links in sequence.
+
+**Best for:** Equal-quality links with similar characteristics.
+
+```
+Packet 1 → WAN1
+Packet 2 → WAN2
+Packet 3 → WAN3
+Packet 4 → WAN1 (cycle repeats)
+```
+
+### Weighted Round-Robin
+Distributes segments based on configured weights (e.g., prefer faster links).
+
+**Best for:** Links with different bandwidth capacities.
+
+```
+WAN1 (4G):  Weight 2 → Gets 2 out of every 5 packets
+WAN2 (5G):  Weight 3 → Gets 3 out of every 5 packets
+```
 
 ### Latency-Based
-Routes packets based on real-time latency measurements.
+Routes segments based on real-time latency measurements, similar to MIMO's channel quality indicator (CQI).
 
-### Adaptive (Recommended)
-Dynamically adjusts distribution based on:
-- Link latency
-- Available bandwidth
-- Packet loss rate
-- Link stability
-- Historical performance
+**Best for:** Real-time applications (VoIP, gaming, video conferencing).
+
+```
+Latency-sensitive packet → Lowest latency link
+Bulk transfer packet → Any available link
+```
+
+### Bandwidth-Based
+Distributes segments proportionally to available bandwidth on each link.
+
+**Best for:** Maximizing throughput for large transfers.
+
+### Adaptive (Recommended - MIMO-Inspired)
+Dynamically adjusts distribution based on multiple real-time metrics, similar to MIMO's adaptive modulation and coding:
+
+**Metrics considered:**
+- **Link latency**: Current round-trip time
+- **Available bandwidth**: Measured throughput
+- **Packet loss rate**: Error rate per link
+- **Queue depth**: Buffered packets per interface
+- **Link stability**: Variance in performance metrics
+- **Historical performance**: Learning from past behavior
+- **Link cost**: Metered vs unmetered considerations
+
+**Algorithm behavior:**
+```
+For each packet segment:
+  1. Measure current state of all WAN links
+  2. Calculate a "channel quality score" for each link
+  3. Apply traffic-type specific preferences
+  4. Select optimal link using weighted scoring
+  5. Update historical metrics
+  6. Adapt thresholds based on performance
+```
+
+**Traffic-type optimization:**
+- **Interactive (SSH, gaming)**: Prioritize low latency
+- **Streaming (video)**: Balance latency and bandwidth
+- **Bulk (downloads)**: Maximize bandwidth utilization
+- **VoIP**: Minimize jitter and packet loss
 
 ## About Benlycos
 
@@ -400,8 +686,12 @@ While MPTCP (Multipath TCP) operates at the TCP protocol level, EdgeBOS Aggregat
 ### How is this different from mwan3?
 
 mwan3 is a multi-WAN load balancer that works at the routing level. EdgeBOS Aggregator Next provides true bonding:
-- **mwan3**: Routes different connections through different WANs (policy-based routing)
-- **EdgeBOS**: Bonds WANs together, splitting individual connections across multiple links for true bandwidth aggregation
+- **mwan3**: Routes different connections through different WANs (policy-based routing). A single connection uses only one WAN.
+- **EdgeBOS**: Bonds WANs together using MIMO-inspired packet segmentation, splitting individual connections across multiple links for true bandwidth aggregation. A single download can use all WANs simultaneously.
+
+**Example:**
+- With mwan3: Downloading a 100MB file on a 10 Mbps link takes ~80 seconds, even if you have 3 other unused WANs
+- With EdgeBOS: The same file is split across all 4 links, completing in ~20 seconds
 
 ### Can I use this with a VPN?
 
@@ -429,7 +719,13 @@ Any OpenWrt 24-compatible router with sufficient RAM (256MB+) and multiple netwo
 
 ### Do I need a special server?
 
-Yes, you need to run the EdgeBOS Aggregator Next Server (Ubuntu 24/25) to receive and reassemble the bonded traffic.
+Yes, you need to run the EdgeBOS Aggregator Next Server (Ubuntu 24/25) to receive and reassemble the bonded traffic. The server performs the inverse operation:
+- Receives packet segments from multiple WAN links
+- Reorders segments by sequence number
+- Reassembles original packets
+- Forwards to final destination
+
+Think of it as the MIMO receiver that combines signals from multiple antennas.
 
 ### Can I use this for gaming?
 
